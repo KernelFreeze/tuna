@@ -38,6 +38,11 @@ class mpris_source : public music_source {
     void parse_array(DBusMessageIter* iter, QString const& player, int level = 0);
     void parse_metadata(DBusMessageIter* iter, QString const& player, int level = 0);
 
+    // Position is explicitly not delivered via PropertiesChanged per the MPRIS
+    // spec, so we have to actively query it to keep song progress up to date.
+    void query_position();
+    void query_position(QString const& player);
+
     inline void ensure_entry(QString const& player)
     {
         if (!m_info.contains(player))

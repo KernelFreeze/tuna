@@ -534,7 +534,80 @@ void mpris_source::internal_refresh()
                 bwarn("[MPRIS] Need more memory to read dbus messages");
             }
         } while (remains != DBUS_DISPATCH_COMPLETE);
+
+        // Poll the active player's position. Done on this thread so that all
+        // dbus I/O stays single-threaded (mixing a blocking call from another
+        // thread with the dispatch loop above can make the reply get stolen).
+        query_position();
     }
+}
+
+void mpris_source::query_position()
+{
+    QString player;
+    {
+        std::lock_guard<std::mutex> lock(m_internal_mutex);
+        // Mirror refresh(): poll the explicitly selected player, otherwise the
+        // most recently updated one.
+        if (m_info.contains(m_selected_player)) {
+            player = m_selected_player;
+        } else {
+            qint64 most_recent {};
+            for (auto const& p : m_info.keys()) {
+                if (m_info[p].update_time > most_recent) {
+                    most_recent = m_info[p].update_time;
+                    player = p;
+                }
+            }
+        }
+
+        // Only bother querying while actually playing; when paused the position
+        // is frozen and the last polled value stays correct.
+        if (player.isEmpty() || m_info[player].metadata.get<int>(meta::STATUS, play_state::state_unknown) != play_state::state_playing)
+            return;
+    }
+
+    query_position(player);
+}
+
+void mpris_source::query_position(QString const& player)
+{
+    DBusMessage* msg = dbus_message_new_method_call(qt_to_utf8(player), "/org/mpris/MediaPlayer2",
+        "org.freedesktop.DBus.Properties", "Get");
+    if (!msg)
+        return;
+
+    const char* iface = "org.mpris.MediaPlayer2.Player";
+    const char* prop = "Position";
+    dbus_message_append_args(msg, DBUS_TYPE_STRING, &iface, DBUS_TYPE_STRING, &prop, DBUS_TYPE_INVALID);
+
+    DBusError error;
+    dbus_error_init(&error);
+    DBusMessage* resp = dbus_connection_send_with_reply_and_block(m_dbus_connection, msg, 500, &error);
+    dbus_message_unref(msg);
+
+    if (dbus_error_is_set(&error)) {
+        // Plenty of players don't implement Position, no point spamming errors
+        dbus_error_free(&error);
+        return;
+    }
+    if (!resp)
+        return;
+
+    DBusMessageIter iter {}, sub {};
+    if (dbus_message_iter_init(resp, &iter) && dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_VARIANT) {
+        dbus_message_iter_recurse(&iter, &sub);
+        if (dbus_message_iter_get_arg_type(&sub) == DBUS_TYPE_INT64) {
+            dbus_int64_t pos {};
+            dbus_message_iter_get_basic(&sub, &pos);
+            std::lock_guard<std::mutex> lock(m_internal_mutex);
+            // pos is in microseconds, progress is tracked in milliseconds.
+            // Don't touch update_time here so this doesn't hijack the
+            // most-recent-player selection in refresh().
+            m_info[player].metadata.set(meta::PROGRESS, int(pos / 1000));
+        }
+    }
+    dbus_message_unref(resp);
 }
 
 DBusHandlerResult mpris_source::handle_message(DBusConnection* connection, DBusMessage* message)
