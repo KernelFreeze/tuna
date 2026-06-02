@@ -20,6 +20,7 @@
 #include "../gui/widgets/mpris.hpp"
 #include "../util/config.hpp"
 #include "../util/constants.hpp"
+#include "../util/cover_tag_handler.hpp"
 #include "../util/utility.hpp"
 
 /**
@@ -516,6 +517,63 @@ void mpris_source::refresh()
         if (!recent_key.isEmpty()) {
             m_current = m_info[recent_key].metadata;
         }
+    }
+}
+
+static inline QString local_file_from_url(QString const& url)
+{
+    // xesam:url is stored raw (and usually percent-encoded). Only local files
+    // can have an embedded/folder cover; QUrl::toLocalFile returns empty for
+    // anything that isn't a file:// url and handles the percent decoding.
+    if (!url.startsWith("file://"))
+        return {};
+    return QUrl(url).toLocalFile();
+}
+
+void mpris_source::handle_cover()
+{
+    if (m_current == m_prev)
+        return;
+
+    if (m_current.get<int>(meta::STATUS) == state_playing) {
+        bool result = false;
+
+        // Prefer the player-provided cover (mpris:artUrl) when present.
+        auto art = m_current.get(meta::COVER);
+        if (art != "n/a")
+            result = util::download_cover(art);
+
+        // Fall back to the song file's embedded cover (or a cover image sitting
+        // in the same folder) for players that expose a local file via
+        // xesam:url but don't provide an artUrl.
+        if (!result) {
+            QString file_path = local_file_from_url(m_current.get(meta::URL));
+            if (!file_path.isEmpty()) {
+                QString tmp;
+                if (cover::find_embedded_cover(file_path)) {
+                    result = true;
+                } else {
+                    cover::get_file_folder(file_path);
+                    if (cover::find_local_cover(file_path, tmp)) {
+                        tmp = "file://" + tmp; /* cURL needs this to "download" the file */
+                        result = util::download_cover(tmp);
+                    }
+                }
+            }
+        }
+
+        if (!result && !download_missing_cover())
+            util::reset_cover();
+    } else if (m_current.get<int>(meta::STATUS) != state_paused || config::placeholder_when_paused) {
+        /* We either
+            - are in a stopped/unknown state                -> reset cover
+            - are paused & want a placeholder when paused   -> reset cover
+            - do not have a cover                           -> try downloading cover
+        */
+        if (!m_current.has(meta::COVER))
+            download_missing_cover();
+        else
+            util::reset_cover();
     }
 }
 

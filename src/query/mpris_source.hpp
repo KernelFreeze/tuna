@@ -69,6 +69,7 @@ public:
 
     void load() override;
     void refresh() override;
+    void handle_cover() override;
     void internal_refresh();
     bool execute_capability(capability) override { return false; }
     bool enabled() const override { return true; }
