@@ -40,6 +40,7 @@ class mpris_source : public music_source {
 
     // Position is explicitly not delivered via PropertiesChanged per the MPRIS
     // spec, so we have to actively query it to keep song progress up to date.
+    void query_properties(QString const& player);
     void query_position();
     void query_position(QString const& player);
 

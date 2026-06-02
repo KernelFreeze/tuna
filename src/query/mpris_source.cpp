@@ -120,7 +120,12 @@ bool mpris_source::dbus_register_names()
                     dbus_message_iter_get_basic(&iter2, &name);
                     if (utf8_to_qt(name).startsWith(MPRIS_NAME_START)) {
                         char* unique_name = dbus_get_name_owner(name);
-                        m_players[utf8_to_qt(unique_name)] = format_name(name);
+                        if (!unique_name)
+                            continue;
+
+                        QString player = utf8_to_qt(unique_name);
+                        m_players[player] = format_name(name);
+                        query_properties(player);
                         bfree(unique_name);
                     }
                 }
@@ -186,8 +191,12 @@ DBusHandlerResult mpris_source::handle_dbus(DBusMessage* message)
     if (QString(name).startsWith(MPRIS_NAME_START)) { // if mpris name
         if (registering_name) {
             binfo("[MPRIS] Registration of %s as %s", new_name, name);
-            std::lock_guard<std::mutex> lock(m_internal_mutex);
-            m_players[utf8_to_qt(new_name)] = format_name(name);
+            QString player = utf8_to_qt(new_name);
+            {
+                std::lock_guard<std::mutex> lock(m_internal_mutex);
+                m_players[player] = format_name(name);
+            }
+            query_properties(player);
         } else {
             binfo("[MPRIS] Unregistering of %s as %s", old_name, name);
             std::lock_guard<std::mutex> lock(m_internal_mutex);
@@ -250,10 +259,10 @@ void mpris_source::parse_metadata(DBusMessageIter* iter, QString const& player, 
                 m_info[player].metadata.set(meta::DURATION, length);
                 m_info[player].update_time = util::epoch();
             } else if (prop == "mpris:length") {
-                int length;
+                dbus_int64_t length;
                 dbus_message_iter_recurse(iter, &sub);
                 dbus_message_iter_get_basic(&sub, &length);
-                m_info[player].metadata.set(meta::DURATION, length / 1000);
+                m_info[player].metadata.set(meta::DURATION, int(length / 1000));
                 m_info[player].update_time = util::epoch();
             } else if (prop == "vlc:publisher") {
                 // borked
@@ -396,10 +405,10 @@ void mpris_source::parse_array(DBusMessageIter* iter, QString const& player, int
                 parse_metadata(&subsub, player, level + 1);
             } else if (strcmp(property_name, "Position") == 0) {
                 std::lock_guard<std::mutex> lock(m_internal_mutex);
-                int pos;
+                dbus_int64_t pos;
                 dbus_message_iter_recurse(iter, &sub);
                 dbus_message_iter_get_basic(&sub, &pos);
-                m_info[player].metadata.set(meta::PROGRESS, pos / 1000);
+                m_info[player].metadata.set(meta::PROGRESS, int(pos / 1000));
                 m_info[player].update_time = util::epoch();
             } else {
                 bdebug("[MPRIS] Not handled %s", property_name);
@@ -598,6 +607,42 @@ void mpris_source::internal_refresh()
         // thread with the dispatch loop above can make the reply get stolen).
         query_position();
     }
+}
+
+void mpris_source::query_properties(QString const& player)
+{
+    if (player.isEmpty())
+        return;
+
+    DBusMessage* msg = dbus_message_new_method_call(qt_to_utf8(player), "/org/mpris/MediaPlayer2",
+        "org.freedesktop.DBus.Properties", "GetAll");
+    if (!msg)
+        return;
+
+    const char* iface = "org.mpris.MediaPlayer2.Player";
+    dbus_message_append_args(msg, DBUS_TYPE_STRING, &iface, DBUS_TYPE_INVALID);
+
+    DBusError error;
+    dbus_error_init(&error);
+    DBusMessage* resp = dbus_connection_send_with_reply_and_block(m_dbus_connection, msg, 500, &error);
+    dbus_message_unref(msg);
+
+    if (dbus_error_is_set(&error)) {
+        berr("[MPRIS] Failed to query properties for %s (%s)", qt_to_utf8(player), error.message);
+        dbus_error_free(&error);
+        return;
+    }
+    if (!resp)
+        return;
+
+    DBusMessageIter iter {}, sub {};
+    if (dbus_message_iter_init(resp, &iter) && dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_ARRAY) {
+        ensure_entry(player);
+        dbus_message_iter_recurse(&iter, &sub);
+        parse_array(&sub, player);
+    }
+
+    dbus_message_unref(resp);
 }
 
 void mpris_source::query_position()
